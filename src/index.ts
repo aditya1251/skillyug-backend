@@ -1,4 +1,4 @@
-import express, { Request, Response, NextFunction, urlencoded } from "express"
+import express, {  Response, NextFunction, urlencoded } from "express"
 import dotenv from "dotenv"
 import Razorpay from "razorpay"
 import cors from "cors"
@@ -36,13 +36,13 @@ connectToDatabase();
 
 // --- Razorpay Instance ---
 if (!process.env.RAZORPAY_KEY || !process.env.RAZORPAY_SECRET) {
-    console.error("❌ Fatal Error: Razorpay Key or Secret is not defined in .env file");
-    process.exit(1);
+  console.error("❌ Fatal Error: Razorpay Key or Secret is not defined in .env file");
+  process.exit(1);
 }
 
 export const instance = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY,
-    key_secret: process.env.RAZORPAY_SECRET
+  key_id: process.env.RAZORPAY_KEY,
+  key_secret: process.env.RAZORPAY_SECRET
 });
 
 // --- Express App Initialization ---
@@ -69,7 +69,7 @@ const getAllowedOrigins = (): string[] => {
     'http://localhost:3000',        // Local development
     'http://frontend:3000',         // Docker container communication
   ];
-  
+
   // Add production origins only in production
   if (process.env.NODE_ENV === 'production') {
     baseOrigins.push(
@@ -77,77 +77,106 @@ const getAllowedOrigins = (): string[] => {
       'https://www.skillyug.com'
     );
   }
-  
+
   // Add environment-specific origins if defined
   if (process.env.FRONTEND_URL) {
     baseOrigins.push(process.env.FRONTEND_URL);
   }
-  
+
   return baseOrigins.filter(Boolean);
 };
 
 const allowedOrigins = getAllowedOrigins();
+// --- CORS configuration (updated, safe for production) ---
+import { Request } from "express";
 
 const corsOptions = {
-  origin: function (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) {
-    // In development, allow requests with no origin (like Postman, curl)
-    if (!origin && process.env.NODE_ENV === 'development') {
-      return callback(null, true);
-    }
-    
-    // In production, require origin header
-    if (!origin && process.env.NODE_ENV === 'production') {
-      console.warn('CORS blocked: No origin header in production');
+  // Use the 3-arg signature so we can inspect the request when origin is missing
+  origin: (req: Request, origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    // 1) Allow requests with no Origin for safe cases:
+    //    - Health checks or simple server-to-server requests often omit Origin.
+    //    - Allow for GET/HEAD to '/', '/api/test', or other health endpoints.
+    const isHealthCheckPath = ['/api/test', '/'].includes(req.path);
+    const isSafeMethod = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+
+    if (!origin) {
+      // In development: allow everything with no origin (Postman, curl)
+      if (process.env.NODE_ENV !== 'production') {
+        return callback(null, true);
+      }
+
+      // In production: allow no-origin only for safe methods and health-check paths.
+      if (isSafeMethod && isHealthCheckPath) {
+        console.warn(`CORS: allowed no-origin ${req.method} ${req.path} (health check/internal)`);
+        return callback(null, true);
+      }
+
+      // For other production cases, still allow some internal routes (customize if needed)
+      // If you need to allow more paths (like internal webhook endpoints), add them here:
+      // if (isSafeMethod && req.path.startsWith('/internal')) return callback(null, true);
+
+      console.warn('CORS blocked: No origin header in production', { method: req.method, path: req.path });
       return callback(new Error('Origin header required'), false);
     }
-    
-    if (origin && allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.warn(`CORS blocked origin: ${origin}`);
-      callback(new Error('Not allowed by CORS'), false);
+
+    // 2) If origin present, enforce whitelist
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
     }
+
+    // 3) Optionally support wildcard-ish matching for preview/deploy domains:
+    // e.g., allow vercel preview domains that start with 'https://skillyug-frontend'
+    if (origin.startsWith('https://skillyug-frontend')) {
+      return callback(null, true);
+    }
+
+    console.warn(`CORS blocked origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'), false);
   },
+
   credentials: true,
   optionsSuccessStatus: 200,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'X-User-ID', 'X-User-Type'],
   exposedHeaders: ['X-Total-Count', 'X-Page-Count'],
   maxAge: 86400, // 24 hours
-};
+} as any; // `as any` avoids strict typing mismatch for the 3-arg signature
+
+// Apply CORS (unchanged)
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // Ensure preflight uses same rules
 
 // Rate limiting with different tiers
 const generalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per windowMs
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: {
-        error: 'Too many requests from this IP, please try again after 15 minutes',
-        code: 'RATE_LIMIT_EXCEEDED'
-    },
-    skip: (req) => {
-        // Skip rate limiting for health checks
-        return req.path === '/api/test' || req.path === '/';
-    }
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many requests from this IP, please try again after 15 minutes',
+    code: 'RATE_LIMIT_EXCEEDED'
+  },
+  skip: (req) => {
+    // Skip rate limiting for health checks
+    return req.path === '/api/test' || req.path === '/';
+  }
 });
 
 const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10, // Limit auth attempts to 10 per 15 minutes (fixed from 1000)
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: {
-        error: 'Too many authentication attempts, please try again after 15 minutes',
-        code: 'AUTH_RATE_LIMIT_EXCEEDED'
-    },
-    // Skip rate limiting for successful requests
-    skipSuccessfulRequests: true,
-    // Use IP + user agent for more accurate limiting
-    keyGenerator: (req) => {
-        return `${req.ip}-${req.get('User-Agent')?.substring(0, 50) || 'unknown'}`;
-    }
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Limit auth attempts to 10 per 15 minutes (fixed from 1000)
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: 'Too many authentication attempts, please try again after 15 minutes',
+    code: 'AUTH_RATE_LIMIT_EXCEEDED'
+  },
+  // Skip rate limiting for successful requests
+  skipSuccessfulRequests: true,
+  // Use IP + user agent for more accurate limiting
+  keyGenerator: (req) => {
+    return `${req.ip}-${req.get('User-Agent')?.substring(0, 50) || 'unknown'}`;
+  }
 });
 
 
@@ -162,35 +191,35 @@ app.use(urlencoded({ extended: true }));
 
 // Debug middleware for auth endpoints
 app.use('/api/auth', (req: Request, res: Response, next: NextFunction) => {
-    console.log(`🔍 Auth Request Debug:`, {
-        method: req.method,
-        url: req.url,
-        body: req.body,
-        headers: {
-            'content-type': req.headers['content-type'],
-            'origin': req.headers.origin,
-            'user-agent': req.headers['user-agent']?.substring(0, 50)
-        }
-    });
-    next();
+  console.log(`🔍 Auth Request Debug:`, {
+    method: req.method,
+    url: req.url,
+    body: req.body,
+    headers: {
+      'content-type': req.headers['content-type'],
+      'origin': req.headers.origin,
+      'user-agent': req.headers['user-agent']?.substring(0, 50)
+    }
+  });
+  next();
 });
 
 // --- Health Check and Public Routes ---
 app.get('/api/test', (req: Request, res: Response) => {
-    res.status(200).json({ 
-        message: 'Backend API is working!',
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
-    });
+  res.status(200).json({
+    message: 'Backend API is working!',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
 
 app.get("/", (req: Request, res: Response) => {
-    res.status(200).send("<h1>Backend is up and running!</h1>");
+  res.status(200).send("<h1>Backend is up and running!</h1>");
 });
 
 // Legacy endpoint for Razorpay key (kept for backward compatibility)
 app.get('/api/getKey', (req: Request, res: Response) => {
-    res.status(200).json({ key: process.env.RAZORPAY_KEY });
+  res.status(200).json({ key: process.env.RAZORPAY_KEY });
 });
 
 // --- API Routes ---
@@ -203,10 +232,10 @@ app.use("/api/recommendations", recommendationRouter);
 
 // --- 404 Handler for unmatched routes ---
 app.use((req: Request, res: Response, _next: NextFunction) => {
-    res.status(404).json({
-        status: 'fail',
-        message: `Can't find ${req.originalUrl} on this server!`
-    });
+  res.status(404).json({
+    status: 'fail',
+    message: `Can't find ${req.originalUrl} on this server!`
+  });
 });
 
 // --- Global Error Handling Middleware ---
@@ -214,25 +243,25 @@ app.use(globalErrorHandler);
 
 // --- Server Startup ---
 const server = app.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
-    console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🌐 CORS enabled for: ${allowedOrigins.join(', ')}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 CORS enabled for: ${allowedOrigins.join(', ')}`);
 });
 
 // --- Graceful Shutdown ---
 const gracefulShutdown = (signal: string) => {
-    console.log(`\n🚨 Received ${signal}. Shutting down gracefully...`);
-    server.close(async () => {
-        console.log('✅ HTTP server closed.');
-        try {
-            await prisma.$disconnect();
-            console.log('✅ Database connection closed.');
-            process.exit(0);
-        } catch (error) {
-            console.error('❌ Error during database disconnection:', error);
-            process.exit(1);
-        }
-    });
+  console.log(`\n🚨 Received ${signal}. Shutting down gracefully...`);
+  server.close(async () => {
+    console.log('✅ HTTP server closed.');
+    try {
+      await prisma.$disconnect();
+      console.log('✅ Database connection closed.');
+      process.exit(0);
+    } catch (error) {
+      console.error('❌ Error during database disconnection:', error);
+      process.exit(1);
+    }
+  });
 };
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
