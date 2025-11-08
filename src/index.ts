@@ -144,8 +144,7 @@ const corsOptions = {
 
 // Apply CORS (unchanged)
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Ensure preflight uses same rules
-
+app.options('/*', cors(corsOptions)); // valid pattern for path-to-regexp
 // Rate limiting with different tiers
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
